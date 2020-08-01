@@ -1,80 +1,73 @@
 package main
 
 import (
-	"bytes"
-	"context"
+	"errors"
 	"flag"
 	"fmt"
-	"html/template"
 	"io/ioutil"
 	"log"
 	"os"
 	"strings"
+	"sync"
 
-	"github.com/whytheplatypus/errgroup"
-	"github.com/whytheplatypus/tester/assertions"
-	"github.com/whytheplatypus/tester/tests"
+	"github.com/whytheplatypus/reagent/experiment"
 )
 
-type StringMapVar map[string]string
+var exitCode = 0
 
-func (av StringMapVar) String() string {
+var errBadStringMapVar = errors.New("Variables must be of the form key=value")
+
+type stringMapVar map[string]string
+
+func (av stringMapVar) String() string {
 	return ""
 }
 
-func (av StringMapVar) Set(s string) error {
+func (av stringMapVar) Set(s string) error {
 	args := strings.SplitN(s, "=", 2)
 	if len(args) != 2 {
-		return fmt.Errorf("Variables must be of the form key=value")
+		return errBadStringMapVar
 	}
 	av[args[0]] = args[1]
 	return nil
 }
 
 func main() {
-	vars := StringMapVar{}
+	flags := flag.NewFlagSet(os.Args[0], flag.ExitOnError)
+	flags.Usage = func() {
+		fmt.Fprintf(flags.Output(), "Usage of %s:\n %s [flags] [files]\nFlags:\n", os.Args[0], os.Args[0])
+		flags.PrintDefaults()
+	}
+	vars := stringMapVar{}
 	var verbose bool
-	flag.BoolVar(&verbose, "v", false, "Enable for verbose logging")
-	flag.Var(&vars, "var", "Variables to use in the rendering of test files. Must be of the form key=value")
-	flag.Parse()
-	tf := flag.Args()
+	flags.BoolVar(&verbose, "v", false, "Enable for verbose logging")
+	flags.Var(&vars, "var", "Variables to use in the rendering of test files. Must be of the form key=value")
+	flags.Parse(os.Args[1:])
+	tf := flags.Args()
 	if verbose {
-		log.SetFlags(log.Lshortfile | log.LstdFlags)
+		log.SetFlags(log.LstdFlags)
 	} else {
 		log.SetOutput(ioutil.Discard)
 	}
-
+	var wg sync.WaitGroup
 	for _, f := range tf {
-		t := template.Must(template.ParseFiles(f))
-		b := bytes.NewBuffer([]byte{})
-		if err := t.Execute(b, vars); err != nil {
-			log.Fatal(err)
-		}
-		ts, err := tests.Decode(b)
-		if err != nil {
-			log.Fatal(err)
-		}
-		// render toml files
-		// parse results
-		// run each test
-		ctx := context.Background()
-		var g errgroup.Group
-		for n, t := range ts {
-			g.Go(func(t assertions.Testable, n string) func() error {
-				c := context.WithValue(ctx, t, n)
-				return func() error {
-					return assertions.Parallell(c, t)
-				}
-			}(t, n))
-		}
-		if err := g.Wait(); err != nil {
-			fmt.Println(err)
-			os.Exit(1)
-		}
+		wg.Add(1)
+		go func(f string) {
+			defer wg.Done()
+			t, err := experiment.NewTrial(f, vars, f)
+			if err != nil {
+				exitCode = 1
+				fmt.Println(t.Name, err)
+				return
+			}
+			if err := t.Run(); err != nil {
+				exitCode = 1
+				log.Println(t.Name, err)
+				return
+			}
+			log.Println("PASS:", f)
+		}(f)
 	}
-	// assert response code
-	// validate response json schema if present
-	// collect errors
-	// report errors
-	// report statistics (request time)
+	wg.Wait()
+	os.Exit(exitCode)
 }

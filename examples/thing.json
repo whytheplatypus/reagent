@@ -1,0 +1,11 @@
+{
+	"properties": {
+		"hello": {
+			"type": "string"
+		},
+		"works": {
+			"type": "boolean"
+		}
+	},
+	"required": ["hello", "works"]
+}

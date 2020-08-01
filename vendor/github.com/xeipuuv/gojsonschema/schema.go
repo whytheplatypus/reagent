@@ -45,50 +45,12 @@ var (
 	ErrorTemplateFuncs template.FuncMap
 )
 
+// NewSchema instances a schema using the given JSONLoader
 func NewSchema(l JSONLoader) (*Schema, error) {
-	ref, err := l.JsonReference()
-	if err != nil {
-		return nil, err
-	}
-
-	d := Schema{}
-	d.pool = newSchemaPool(l.LoaderFactory())
-	d.documentReference = ref
-	d.referencePool = newSchemaReferencePool()
-
-	var spd *schemaPoolDocument
-	var doc interface{}
-	if ref.String() != "" {
-		// Get document from schema pool
-		spd, err = d.pool.GetDocument(d.documentReference)
-		if err != nil {
-			return nil, err
-		}
-		doc = spd.Document
-
-		// Deal with fragment pointers
-		jsonPointer := ref.GetPointer()
-		doc, _, err = jsonPointer.Get(doc)
-		if err != nil {
-			return nil, err
-		}
-	} else {
-		// Load JSON directly
-		doc, err = l.LoadJSON()
-		if err != nil {
-			return nil, err
-		}
-	}
-	d.pool.SetStandaloneDocument(doc)
-
-	err = d.parse(doc)
-	if err != nil {
-		return nil, err
-	}
-
-	return &d, nil
+	return NewSchemaLoader().Compile(l)
 }
 
+// Schema holds a schema
 type Schema struct {
 	documentReference gojsonreference.JsonReference
 	rootSchema        *subSchema
@@ -96,11 +58,12 @@ type Schema struct {
 	referencePool     *schemaReferencePool
 }
 
-func (d *Schema) parse(document interface{}) error {
-	d.rootSchema = &subSchema{property: STRING_ROOT_SCHEMA_PROPERTY}
+func (d *Schema) parse(document interface{}, draft Draft) error {
+	d.rootSchema = &subSchema{property: STRING_ROOT_SCHEMA_PROPERTY, draft: &draft}
 	return d.parseSchema(document, d.rootSchema)
 }
 
+// SetRootSchemaName sets the root-schema name
 func (d *Schema) SetRootSchemaName(name string) {
 	d.rootSchema.property = name
 }
@@ -113,14 +76,18 @@ func (d *Schema) SetRootSchemaName(name string) {
 //
 func (d *Schema) parseSchema(documentNode interface{}, currentSchema *subSchema) error {
 
-	// As of draft 6 "true" is equivalent to an empty schema "{}" and false equals "{"not":{}}"
-	if isKind(documentNode, reflect.Bool) {
-		b := documentNode.(bool)
-		if b {
-			documentNode = map[string]interface{}{}
-		} else {
-			documentNode = map[string]interface{}{"not": true}
+	if currentSchema.draft == nil {
+		if currentSchema.parent == nil {
+			return errors.New("Draft not set")
 		}
+		currentSchema.draft = currentSchema.parent.draft
+	}
+
+	// As of draft 6 "true" is equivalent to an empty schema "{}" and false equals "{"not":{}}"
+	if *currentSchema.draft >= Draft6 && isKind(documentNode, reflect.Bool) {
+		b := documentNode.(bool)
+		currentSchema.pass = &b
+		return nil
 	}
 
 	if !isKind(documentNode, reflect.Map) {
@@ -137,18 +104,6 @@ func (d *Schema) parseSchema(documentNode interface{}, currentSchema *subSchema)
 	if currentSchema.parent == nil {
 		currentSchema.ref = &d.documentReference
 		currentSchema.id = &d.documentReference
-
-		if existsMapKey(m, KEY_SCHEMA) && false {
-			if !isKind(m[KEY_SCHEMA], reflect.String) {
-				return errors.New(formatErrorDescription(
-					Locale.InvalidType(),
-					ErrorDetails{
-						"expected": TYPE_STRING,
-						"given":    KEY_SCHEMA,
-					},
-				))
-			}
-		}
 	}
 
 	if currentSchema.id == nil && currentSchema.parent != nil {
@@ -156,10 +111,19 @@ func (d *Schema) parseSchema(documentNode interface{}, currentSchema *subSchema)
 	}
 
 	// In draft 6 the id keyword was renamed to $id
-	// Use the old id by default
-	keyID := KEY_ID_NEW
-	if existsMapKey(m, KEY_ID) {
+	// Hybrid mode uses the old id by default
+	var keyID string
+
+	switch *currentSchema.draft {
+	case Draft4:
 		keyID = KEY_ID
+	case Hybrid:
+		keyID = KEY_ID_NEW
+		if existsMapKey(m, KEY_ID) {
+			keyID = KEY_ID
+		}
+	default:
+		keyID = KEY_ID_NEW
 	}
 	if existsMapKey(m, keyID) && !isKind(m[keyID], reflect.String) {
 		return errors.New(formatErrorDescription(
@@ -186,73 +150,15 @@ func (d *Schema) parseSchema(documentNode interface{}, currentSchema *subSchema)
 		}
 	}
 
-	// Add schema to document cache. The same id is passed down to subsequent
-	// subschemas, but as only the first and top one is used it will always reference
-	// the correct schema. Doing it once here prevents having
-	// to do this same step at every corner case.
-	// TODO Referencing should be rewritten partially in the future and then this workaround should not be needed
-	d.referencePool.Add(currentSchema.id.String(), currentSchema)
-
-	// $ref
-	if existsMapKey(m, KEY_REF) && !isKind(m[KEY_REF], reflect.String) {
-		return errors.New(formatErrorDescription(
-			Locale.InvalidType(),
-			ErrorDetails{
-				"expected": TYPE_STRING,
-				"given":    KEY_REF,
-			},
-		))
-	}
-	if k, ok := m[KEY_REF].(string); ok {
-
-		jsonReference, err := gojsonreference.NewJsonReference(k)
-		if err != nil {
-			return err
-		}
-
-		if jsonReference.HasFullUrl {
-			currentSchema.ref = &jsonReference
-		} else {
-			inheritedReference, err := currentSchema.id.Inherits(jsonReference)
-			if err != nil {
-				return err
-			}
-			currentSchema.ref = inheritedReference
-		}
-
-		if sch, ok := d.referencePool.Get(currentSchema.ref.String()); ok {
-			currentSchema.refSchema = sch
-		} else {
-			err := d.parseReference(documentNode, currentSchema)
-
-			if err != nil {
-				return err
-			}
-
-			return nil
-		}
-	}
-
 	// definitions
 	if existsMapKey(m, KEY_DEFINITIONS) {
 		if isKind(m[KEY_DEFINITIONS], reflect.Map, reflect.Bool) {
-			currentSchema.definitions = make(map[string]*subSchema)
-			for dk, dv := range m[KEY_DEFINITIONS].(map[string]interface{}) {
-				if isKind(dv, reflect.Map) {
+			for _, dv := range m[KEY_DEFINITIONS].(map[string]interface{}) {
+				if isKind(dv, reflect.Map, reflect.Bool) {
 
-					ref, err := gojsonreference.NewJsonReference("#/" + KEY_DEFINITIONS + "/" + dk)
-					if err != nil {
-						return err
-					}
+					newSchema := &subSchema{property: KEY_DEFINITIONS, parent: currentSchema}
 
-					newSchemaID, err := currentSchema.id.Inherits(ref)
-					if err != nil {
-						return err
-					}
-					newSchema := &subSchema{property: KEY_DEFINITIONS, parent: currentSchema, id: newSchemaID}
-					currentSchema.definitions[dk] = newSchema
-
-					err = d.parseSchema(dv, newSchema)
+					err := d.parseSchema(dv, newSchema)
 
 					if err != nil {
 						return err
@@ -307,6 +213,39 @@ func (d *Schema) parseSchema(documentNode interface{}, currentSchema *subSchema)
 		currentSchema.description = &k
 	}
 
+	// $ref
+	if existsMapKey(m, KEY_REF) && !isKind(m[KEY_REF], reflect.String) {
+		return errors.New(formatErrorDescription(
+			Locale.InvalidType(),
+			ErrorDetails{
+				"expected": TYPE_STRING,
+				"given":    KEY_REF,
+			},
+		))
+	}
+
+	if k, ok := m[KEY_REF].(string); ok {
+
+		jsonReference, err := gojsonreference.NewJsonReference(k)
+		if err != nil {
+			return err
+		}
+
+		currentSchema.ref = &jsonReference
+
+		if sch, ok := d.referencePool.Get(currentSchema.ref.String()); ok {
+			currentSchema.refSchema = sch
+		} else {
+			err := d.parseReference(documentNode, currentSchema)
+
+			if err != nil {
+				return err
+			}
+
+			return nil
+		}
+	}
+
 	// type
 	if existsMapKey(m, KEY_TYPE) {
 		if isKind(m[KEY_TYPE], reflect.String) {
@@ -328,8 +267,9 @@ func (d *Schema) parseSchema(documentNode interface{}, currentSchema *subSchema)
 								"given":    KEY_TYPE,
 							},
 						))
-					} else {
-						currentSchema.types.Add(typeInArray.(string))
+					}
+					if err := currentSchema.types.Add(typeInArray.(string)); err != nil {
+						return err
 					}
 				}
 
@@ -409,7 +349,7 @@ func (d *Schema) parseSchema(documentNode interface{}, currentSchema *subSchema)
 	}
 
 	// propertyNames
-	if existsMapKey(m, KEY_PROPERTY_NAMES) {
+	if existsMapKey(m, KEY_PROPERTY_NAMES) && *currentSchema.draft >= Draft6 {
 		if isKind(m[KEY_PROPERTY_NAMES], reflect.Map, reflect.Bool) {
 			newSchema := &subSchema{property: KEY_PROPERTY_NAMES, parent: currentSchema, ref: currentSchema.ref}
 			currentSchema.propertyNames = newSchema
@@ -443,7 +383,7 @@ func (d *Schema) parseSchema(documentNode interface{}, currentSchema *subSchema)
 				if isKind(itemElement, reflect.Map, reflect.Bool) {
 					newSchema := &subSchema{parent: currentSchema, property: KEY_ITEMS}
 					newSchema.ref = currentSchema.ref
-					currentSchema.AddItemsChild(newSchema)
+					currentSchema.itemsChildren = append(currentSchema.itemsChildren, newSchema)
 					err := d.parseSchema(itemElement, newSchema)
 					if err != nil {
 						return err
@@ -462,7 +402,7 @@ func (d *Schema) parseSchema(documentNode interface{}, currentSchema *subSchema)
 		} else if isKind(m[KEY_ITEMS], reflect.Map, reflect.Bool) {
 			newSchema := &subSchema{parent: currentSchema, property: KEY_ITEMS}
 			newSchema.ref = currentSchema.ref
-			currentSchema.AddItemsChild(newSchema)
+			currentSchema.itemsChildren = append(currentSchema.itemsChildren, newSchema)
 			err := d.parseSchema(m[KEY_ITEMS], newSchema)
 			if err != nil {
 				return err
@@ -514,7 +454,7 @@ func (d *Schema) parseSchema(documentNode interface{}, currentSchema *subSchema)
 				},
 			))
 		}
-		if multipleOfValue.Cmp(big.NewFloat(0)) <= 0 {
+		if multipleOfValue.Cmp(big.NewRat(0, 1)) <= 0 {
 			return errors.New(formatErrorDescription(
 				Locale.GreaterThanZero(),
 				ErrorDetails{"number": KEY_MULTIPLE_OF},
@@ -535,25 +475,62 @@ func (d *Schema) parseSchema(documentNode interface{}, currentSchema *subSchema)
 	}
 
 	if existsMapKey(m, KEY_EXCLUSIVE_MINIMUM) {
-		if isKind(m[KEY_EXCLUSIVE_MINIMUM], reflect.Bool) {
+		switch *currentSchema.draft {
+		case Draft4:
+			if !isKind(m[KEY_EXCLUSIVE_MINIMUM], reflect.Bool) {
+				return errors.New(formatErrorDescription(
+					Locale.InvalidType(),
+					ErrorDetails{
+						"expected": TYPE_BOOLEAN,
+						"given":    KEY_EXCLUSIVE_MINIMUM,
+					},
+				))
+			}
 			if currentSchema.minimum == nil {
 				return errors.New(formatErrorDescription(
 					Locale.CannotBeUsedWithout(),
 					ErrorDetails{"x": KEY_EXCLUSIVE_MINIMUM, "y": KEY_MINIMUM},
 				))
 			}
-			exclusiveMinimumValue := m[KEY_EXCLUSIVE_MINIMUM].(bool)
-			currentSchema.exclusiveMinimum = exclusiveMinimumValue
-		} else if isJsonNumber(m[KEY_EXCLUSIVE_MINIMUM]) {
-			minimumValue := mustBeNumber(m[KEY_EXCLUSIVE_MINIMUM])
-
-			currentSchema.minimum = minimumValue
-			currentSchema.exclusiveMinimum = true
-		} else {
-			return errors.New(formatErrorDescription(
-				Locale.InvalidType(),
-				ErrorDetails{"expected": TYPE_BOOLEAN + ", " + TYPE_NUMBER, "given": KEY_EXCLUSIVE_MINIMUM},
-			))
+			if m[KEY_EXCLUSIVE_MINIMUM].(bool) {
+				currentSchema.exclusiveMinimum = currentSchema.minimum
+				currentSchema.minimum = nil
+			}
+		case Hybrid:
+			if isKind(m[KEY_EXCLUSIVE_MINIMUM], reflect.Bool) {
+				if currentSchema.minimum == nil {
+					return errors.New(formatErrorDescription(
+						Locale.CannotBeUsedWithout(),
+						ErrorDetails{"x": KEY_EXCLUSIVE_MINIMUM, "y": KEY_MINIMUM},
+					))
+				}
+				if m[KEY_EXCLUSIVE_MINIMUM].(bool) {
+					currentSchema.exclusiveMinimum = currentSchema.minimum
+					currentSchema.minimum = nil
+				}
+			} else if isJSONNumber(m[KEY_EXCLUSIVE_MINIMUM]) {
+				currentSchema.exclusiveMinimum = mustBeNumber(m[KEY_EXCLUSIVE_MINIMUM])
+			} else {
+				return errors.New(formatErrorDescription(
+					Locale.InvalidType(),
+					ErrorDetails{
+						"expected": TYPE_BOOLEAN + "/" + TYPE_NUMBER,
+						"given":    KEY_EXCLUSIVE_MINIMUM,
+					},
+				))
+			}
+		default:
+			if isJSONNumber(m[KEY_EXCLUSIVE_MINIMUM]) {
+				currentSchema.exclusiveMinimum = mustBeNumber(m[KEY_EXCLUSIVE_MINIMUM])
+			} else {
+				return errors.New(formatErrorDescription(
+					Locale.InvalidType(),
+					ErrorDetails{
+						"expected": TYPE_NUMBER,
+						"given":    KEY_EXCLUSIVE_MINIMUM,
+					},
+				))
+			}
 		}
 	}
 
@@ -569,34 +546,62 @@ func (d *Schema) parseSchema(documentNode interface{}, currentSchema *subSchema)
 	}
 
 	if existsMapKey(m, KEY_EXCLUSIVE_MAXIMUM) {
-		if isKind(m[KEY_EXCLUSIVE_MAXIMUM], reflect.Bool) {
+		switch *currentSchema.draft {
+		case Draft4:
+			if !isKind(m[KEY_EXCLUSIVE_MAXIMUM], reflect.Bool) {
+				return errors.New(formatErrorDescription(
+					Locale.InvalidType(),
+					ErrorDetails{
+						"expected": TYPE_BOOLEAN,
+						"given":    KEY_EXCLUSIVE_MAXIMUM,
+					},
+				))
+			}
 			if currentSchema.maximum == nil {
 				return errors.New(formatErrorDescription(
 					Locale.CannotBeUsedWithout(),
 					ErrorDetails{"x": KEY_EXCLUSIVE_MAXIMUM, "y": KEY_MAXIMUM},
 				))
 			}
-			exclusiveMaximumValue := m[KEY_EXCLUSIVE_MAXIMUM].(bool)
-			currentSchema.exclusiveMaximum = exclusiveMaximumValue
-		} else if isJsonNumber(m[KEY_EXCLUSIVE_MAXIMUM]) {
-			maximumValue := mustBeNumber(m[KEY_EXCLUSIVE_MAXIMUM])
-
-			currentSchema.maximum = maximumValue
-			currentSchema.exclusiveMaximum = true
-		} else {
-			return errors.New(formatErrorDescription(
-				Locale.InvalidType(),
-				ErrorDetails{"expected": TYPE_BOOLEAN + ", " + TYPE_NUMBER, "given": KEY_EXCLUSIVE_MAXIMUM},
-			))
-		}
-	}
-
-	if currentSchema.minimum != nil && currentSchema.maximum != nil {
-		if currentSchema.minimum.Cmp(currentSchema.maximum) == 1 {
-			return errors.New(formatErrorDescription(
-				Locale.CannotBeGT(),
-				ErrorDetails{"x": KEY_MINIMUM, "y": KEY_MAXIMUM},
-			))
+			if m[KEY_EXCLUSIVE_MAXIMUM].(bool) {
+				currentSchema.exclusiveMaximum = currentSchema.maximum
+				currentSchema.maximum = nil
+			}
+		case Hybrid:
+			if isKind(m[KEY_EXCLUSIVE_MAXIMUM], reflect.Bool) {
+				if currentSchema.maximum == nil {
+					return errors.New(formatErrorDescription(
+						Locale.CannotBeUsedWithout(),
+						ErrorDetails{"x": KEY_EXCLUSIVE_MAXIMUM, "y": KEY_MAXIMUM},
+					))
+				}
+				if m[KEY_EXCLUSIVE_MAXIMUM].(bool) {
+					currentSchema.exclusiveMaximum = currentSchema.maximum
+					currentSchema.maximum = nil
+				}
+			} else if isJSONNumber(m[KEY_EXCLUSIVE_MAXIMUM]) {
+				currentSchema.exclusiveMaximum = mustBeNumber(m[KEY_EXCLUSIVE_MAXIMUM])
+			} else {
+				return errors.New(formatErrorDescription(
+					Locale.InvalidType(),
+					ErrorDetails{
+						"expected": TYPE_BOOLEAN + "/" + TYPE_NUMBER,
+						"given":    KEY_EXCLUSIVE_MAXIMUM,
+					},
+				))
+			}
+		default:
+			if isJSONNumber(m[KEY_EXCLUSIVE_MAXIMUM]) {
+				currentSchema.exclusiveMaximum = mustBeNumber(m[KEY_EXCLUSIVE_MAXIMUM])
+			} else {
+				return errors.New(formatErrorDescription(
+					Locale.InvalidType(),
+					ErrorDetails{
+						"expected": TYPE_NUMBER,
+						"given":    KEY_EXCLUSIVE_MAXIMUM,
+					},
+				))
+			}
 		}
 	}
 
@@ -665,9 +670,13 @@ func (d *Schema) parseSchema(documentNode interface{}, currentSchema *subSchema)
 
 	if existsMapKey(m, KEY_FORMAT) {
 		formatString, ok := m[KEY_FORMAT].(string)
-		if ok && FormatCheckers.Has(formatString) {
-			currentSchema.format = formatString
+		if !ok {
+			return errors.New(formatErrorDescription(
+				Locale.MustBeOfType(),
+				ErrorDetails{"key": KEY_FORMAT, "type": TYPE_STRING},
+			))
 		}
+		currentSchema.format = formatString
 	}
 
 	// validation : object
@@ -720,10 +729,13 @@ func (d *Schema) parseSchema(documentNode interface{}, currentSchema *subSchema)
 			requiredValues := m[KEY_REQUIRED].([]interface{})
 			for _, requiredValue := range requiredValues {
 				if isKind(requiredValue, reflect.String) {
-					err := currentSchema.AddRequired(requiredValue.(string))
-					if err != nil {
-						return err
+					if isStringInSlice(currentSchema.required, requiredValue.(string)) {
+						return errors.New(formatErrorDescription(
+							Locale.KeyItemsMustBeUnique(),
+							ErrorDetails{"key": KEY_REQUIRED},
+						))
 					}
+					currentSchema.required = append(currentSchema.required, requiredValue.(string))
 				} else {
 					return errors.New(formatErrorDescription(
 						Locale.KeyItemsMustBeOfType(),
@@ -786,7 +798,7 @@ func (d *Schema) parseSchema(documentNode interface{}, currentSchema *subSchema)
 		}
 	}
 
-	if existsMapKey(m, KEY_CONTAINS) {
+	if existsMapKey(m, KEY_CONTAINS) && *currentSchema.draft >= Draft6 {
 		newSchema := &subSchema{property: KEY_CONTAINS, parent: currentSchema, ref: currentSchema.ref}
 		currentSchema.contains = newSchema
 		err := d.parseSchema(m[KEY_CONTAINS], newSchema)
@@ -797,20 +809,28 @@ func (d *Schema) parseSchema(documentNode interface{}, currentSchema *subSchema)
 
 	// validation : all
 
-	if existsMapKey(m, KEY_CONST) {
-		err := currentSchema.AddConst(m[KEY_CONST])
+	if existsMapKey(m, KEY_CONST) && *currentSchema.draft >= Draft6 {
+		is, err := marshalWithoutNumber(m[KEY_CONST])
 		if err != nil {
 			return err
 		}
+		currentSchema._const = is
 	}
 
 	if existsMapKey(m, KEY_ENUM) {
 		if isKind(m[KEY_ENUM], reflect.Slice) {
 			for _, v := range m[KEY_ENUM].([]interface{}) {
-				err := currentSchema.AddEnum(v)
+				is, err := marshalWithoutNumber(v)
 				if err != nil {
 					return err
 				}
+				if isStringInSlice(currentSchema.enum, *is) {
+					return errors.New(formatErrorDescription(
+						Locale.KeyItemsMustBeUnique(),
+						ErrorDetails{"key": KEY_ENUM},
+					))
+				}
+				currentSchema.enum = append(currentSchema.enum, *is)
 			}
 		} else {
 			return errors.New(formatErrorDescription(
@@ -826,7 +846,7 @@ func (d *Schema) parseSchema(documentNode interface{}, currentSchema *subSchema)
 		if isKind(m[KEY_ONE_OF], reflect.Slice) {
 			for _, v := range m[KEY_ONE_OF].([]interface{}) {
 				newSchema := &subSchema{property: KEY_ONE_OF, parent: currentSchema, ref: currentSchema.ref}
-				currentSchema.AddOneOf(newSchema)
+				currentSchema.oneOf = append(currentSchema.oneOf, newSchema)
 				err := d.parseSchema(v, newSchema)
 				if err != nil {
 					return err
@@ -844,7 +864,7 @@ func (d *Schema) parseSchema(documentNode interface{}, currentSchema *subSchema)
 		if isKind(m[KEY_ANY_OF], reflect.Slice) {
 			for _, v := range m[KEY_ANY_OF].([]interface{}) {
 				newSchema := &subSchema{property: KEY_ANY_OF, parent: currentSchema, ref: currentSchema.ref}
-				currentSchema.AddAnyOf(newSchema)
+				currentSchema.anyOf = append(currentSchema.anyOf, newSchema)
 				err := d.parseSchema(v, newSchema)
 				if err != nil {
 					return err
@@ -862,7 +882,7 @@ func (d *Schema) parseSchema(documentNode interface{}, currentSchema *subSchema)
 		if isKind(m[KEY_ALL_OF], reflect.Slice) {
 			for _, v := range m[KEY_ALL_OF].([]interface{}) {
 				newSchema := &subSchema{property: KEY_ALL_OF, parent: currentSchema, ref: currentSchema.ref}
-				currentSchema.AddAllOf(newSchema)
+				currentSchema.allOf = append(currentSchema.allOf, newSchema)
 				err := d.parseSchema(v, newSchema)
 				if err != nil {
 					return err
@@ -879,7 +899,7 @@ func (d *Schema) parseSchema(documentNode interface{}, currentSchema *subSchema)
 	if existsMapKey(m, KEY_NOT) {
 		if isKind(m[KEY_NOT], reflect.Map, reflect.Bool) {
 			newSchema := &subSchema{property: KEY_NOT, parent: currentSchema, ref: currentSchema.ref}
-			currentSchema.SetNot(newSchema)
+			currentSchema.not = newSchema
 			err := d.parseSchema(m[KEY_NOT], newSchema)
 			if err != nil {
 				return err
@@ -892,51 +912,53 @@ func (d *Schema) parseSchema(documentNode interface{}, currentSchema *subSchema)
 		}
 	}
 
-	if existsMapKey(m, KEY_IF) {
-		if isKind(m[KEY_IF], reflect.Map, reflect.Bool) {
-			newSchema := &subSchema{property: KEY_IF, parent: currentSchema, ref: currentSchema.ref}
-			currentSchema.SetIf(newSchema)
-			err := d.parseSchema(m[KEY_IF], newSchema)
-			if err != nil {
-				return err
+	if *currentSchema.draft >= Draft7 {
+		if existsMapKey(m, KEY_IF) {
+			if isKind(m[KEY_IF], reflect.Map, reflect.Bool) {
+				newSchema := &subSchema{property: KEY_IF, parent: currentSchema, ref: currentSchema.ref}
+				currentSchema._if = newSchema
+				err := d.parseSchema(m[KEY_IF], newSchema)
+				if err != nil {
+					return err
+				}
+			} else {
+				return errors.New(formatErrorDescription(
+					Locale.MustBeOfAn(),
+					ErrorDetails{"x": KEY_IF, "y": TYPE_OBJECT},
+				))
 			}
-		} else {
-			return errors.New(formatErrorDescription(
-				Locale.MustBeOfAn(),
-				ErrorDetails{"x": KEY_IF, "y": TYPE_OBJECT},
-			))
 		}
-	}
 
-	if existsMapKey(m, KEY_THEN) {
-		if isKind(m[KEY_THEN], reflect.Map, reflect.Bool) {
-			newSchema := &subSchema{property: KEY_THEN, parent: currentSchema, ref: currentSchema.ref}
-			currentSchema.SetThen(newSchema)
-			err := d.parseSchema(m[KEY_THEN], newSchema)
-			if err != nil {
-				return err
+		if existsMapKey(m, KEY_THEN) {
+			if isKind(m[KEY_THEN], reflect.Map, reflect.Bool) {
+				newSchema := &subSchema{property: KEY_THEN, parent: currentSchema, ref: currentSchema.ref}
+				currentSchema._then = newSchema
+				err := d.parseSchema(m[KEY_THEN], newSchema)
+				if err != nil {
+					return err
+				}
+			} else {
+				return errors.New(formatErrorDescription(
+					Locale.MustBeOfAn(),
+					ErrorDetails{"x": KEY_THEN, "y": TYPE_OBJECT},
+				))
 			}
-		} else {
-			return errors.New(formatErrorDescription(
-				Locale.MustBeOfAn(),
-				ErrorDetails{"x": KEY_THEN, "y": TYPE_OBJECT},
-			))
 		}
-	}
 
-	if existsMapKey(m, KEY_ELSE) {
-		if isKind(m[KEY_ELSE], reflect.Map, reflect.Bool) {
-			newSchema := &subSchema{property: KEY_ELSE, parent: currentSchema, ref: currentSchema.ref}
-			currentSchema.SetElse(newSchema)
-			err := d.parseSchema(m[KEY_ELSE], newSchema)
-			if err != nil {
-				return err
+		if existsMapKey(m, KEY_ELSE) {
+			if isKind(m[KEY_ELSE], reflect.Map, reflect.Bool) {
+				newSchema := &subSchema{property: KEY_ELSE, parent: currentSchema, ref: currentSchema.ref}
+				currentSchema._else = newSchema
+				err := d.parseSchema(m[KEY_ELSE], newSchema)
+				if err != nil {
+					return err
+				}
+			} else {
+				return errors.New(formatErrorDescription(
+					Locale.MustBeOfAn(),
+					ErrorDetails{"x": KEY_ELSE, "y": TYPE_OBJECT},
+				))
 			}
-		} else {
-			return errors.New(formatErrorDescription(
-				Locale.MustBeOfAn(),
-				ErrorDetails{"x": KEY_ELSE, "y": TYPE_OBJECT},
-			))
 		}
 	}
 
@@ -949,30 +971,22 @@ func (d *Schema) parseReference(documentNode interface{}, currentSchema *subSche
 		dsp              *schemaPoolDocument
 		err              error
 	)
-	jsonPointer := currentSchema.ref.GetPointer()
-	standaloneDocument := d.pool.GetStandaloneDocument()
 
 	newSchema := &subSchema{property: KEY_REF, parent: currentSchema, ref: currentSchema.ref}
 
-	if currentSchema.ref.HasFragmentOnly {
-		refdDocumentNode, _, err = jsonPointer.Get(standaloneDocument)
-		if err != nil {
-			return err
-		}
+	d.referencePool.Add(currentSchema.ref.String(), newSchema)
 
-	} else {
-		dsp, err = d.pool.GetDocument(*currentSchema.ref)
-		if err != nil {
-			return err
-		}
-		newSchema.id = currentSchema.ref
+	dsp, err = d.pool.GetDocument(*currentSchema.ref)
+	if err != nil {
+		return err
+	}
+	newSchema.id = currentSchema.ref
 
-		refdDocumentNode, _, err = jsonPointer.Get(dsp.Document)
+	refdDocumentNode = dsp.Document
+	newSchema.draft = dsp.Draft
 
-		if err != nil {
-			return err
-		}
-
+	if err != nil {
+		return err
 	}
 
 	if !isKind(refdDocumentNode, reflect.Map, reflect.Bool) {
@@ -1006,7 +1020,7 @@ func (d *Schema) parseProperties(documentNode interface{}, currentSchema *subSch
 	for k := range m {
 		schemaProperty := k
 		newSchema := &subSchema{property: schemaProperty, parent: currentSchema, ref: currentSchema.ref}
-		currentSchema.AddPropertiesChild(newSchema)
+		currentSchema.propertiesChildren = append(currentSchema.propertiesChildren, newSchema)
 		err := d.parseSchema(m[k], newSchema)
 		if err != nil {
 			return err
@@ -1044,9 +1058,8 @@ func (d *Schema) parseDependencies(documentNode interface{}, currentSchema *subS
 							"type": STRING_SCHEMA_OR_ARRAY_OF_STRINGS,
 						},
 					))
-				} else {
-					valuesToRegister = append(valuesToRegister, value.(string))
 				}
+				valuesToRegister = append(valuesToRegister, value.(string))
 				currentSchema.dependencies[k] = valuesToRegister
 			}
 

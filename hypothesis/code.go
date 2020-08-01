@@ -1,4 +1,4 @@
-package assertions
+package hypothesis
 
 import (
 	"fmt"
@@ -6,12 +6,12 @@ import (
 )
 
 func init() {
-	asserters["code"] = &Code{}
+	asserters["code"] = &code{}
 }
 
-type Code struct{}
+type code struct{}
 
-func (ca *Code) Assert(r *http.Response, args map[string]interface{}) error {
+func (ca *code) Assert(r *http.Response, args map[string]interface{}) error {
 	c, ok := args["code"]
 	if !ok {
 		return fmt.Errorf("Misconfigured, code required")
