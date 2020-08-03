@@ -26,7 +26,7 @@ method = "GET"
 	Authorization = ["Bearer sample_bearer_token"]
 
 	[read_a_thing.assert]
-		[read_a_thing.assert.code]
+		[read_a_thing.assert.response]
 		code = 200
 		[read_a_thing.assert.jsonschema]
 		ref = "examples/thing.json"
