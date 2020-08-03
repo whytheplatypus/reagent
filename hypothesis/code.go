@@ -6,12 +6,10 @@ import (
 )
 
 func init() {
-	asserters["code"] = &code{}
+	asserters["code"] = assertCode
 }
 
-type code struct{}
-
-func (ca *code) Assert(r *http.Response, args map[string]interface{}) error {
+func assertCode(r *http.Response, args map[string]interface{}) error {
 	c, ok := args["code"]
 	if !ok {
 		return fmt.Errorf("Misconfigured, code required")

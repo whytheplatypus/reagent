@@ -10,12 +10,10 @@ import (
 )
 
 func init() {
-	asserters["jsonschema"] = &jsonSchema{}
+	asserters["jsonschema"] = assertJSONSchema
 }
 
-type jsonSchema struct{}
-
-func (jsa *jsonSchema) Assert(r *http.Response, args map[string]interface{}) error {
+func assertJSONSchema(r *http.Response, args map[string]interface{}) error {
 	ref, ok := args["ref"].(string)
 	if !ok {
 		return fmt.Errorf("ref must be a string %T", ref)

@@ -65,7 +65,7 @@ func handleThings(rw http.ResponseWriter, r *http.Request) {
 			return
 		}
 		things = append(things, t)
-		rw.Header().Set("Content-Type", "application/json; charset=utf-8") // normal header
+		rw.Header().Set("Content-Type", "application/json")
 		fmt.Fprintf(rw, "{\"id\": %d}", len(things)-1)
 	default:
 		http.Error(rw, "unsupported", http.StatusMethodNotAllowed)

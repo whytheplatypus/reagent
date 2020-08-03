@@ -12,8 +12,11 @@ body = """
 	Authorization = ["Bearer sample_bearer_token"]
 
 	[create_a_thing.assert]
-		[create_a_thing.assert.code]
+		[create_a_thing.assert.response]
 		code = 200
+		body = '{"id": 0}'
+		[create_a_thing.assert.response.headers]
+		Content-Type = ["application/json"]
 
 [read_a_thing]
 name = "Read a thing"
@@ -36,7 +39,7 @@ method = "DELETE"
 	Authorization = ["Bearer sample_bearer_token"]
 
 	[delete_a_thing.assert]
-		[delete_a_thing.assert.code]
+		[delete_a_thing.assert.response]
 		code = 201
 
 [read_a_missing_thing]
@@ -47,5 +50,5 @@ method = "GET"
 	Authorization = ["Bearer sample_bearer_token"]
 
 	[read_a_missing_thing.assert]
-		[read_a_missing_thing.assert.code]
+		[read_a_missing_thing.assert.response]
 		code = 404

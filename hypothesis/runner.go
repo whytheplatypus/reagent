@@ -8,11 +8,9 @@ import (
 	"net/http/httputil"
 )
 
-var asserters = map[string]assertable{}
+type assertable func(*http.Response, map[string]interface{}) error
 
-type assertable interface {
-	Assert(*http.Response, map[string]interface{}) error
-}
+var asserters = map[string]assertable{}
 
 type testable interface {
 	Do() (*http.Response, error)
@@ -38,7 +36,7 @@ func Check(t testable) (result []byte, err error) {
 		if !ok {
 			return nil, ErrUnregisteredAsserter
 		}
-		if err := asserter.Assert(res, args); err != nil {
+		if err := asserter(res, args); err != nil {
 			resp, _ := httputil.DumpResponse(res, true)
 			req, _ := httputil.DumpRequest(res.Request, true)
 			return nil, fmt.Errorf("%s : %s : %s", err, string(req), string(resp))
