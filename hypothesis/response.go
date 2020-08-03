@@ -32,11 +32,11 @@ func assertResponse(r *http.Response, args map[string]interface{}) error {
 }
 
 func checkCode(r *http.Response, c interface{}) error {
-	code, ok := c.(int64)
+	code, ok := c.(int)
 	if !ok {
 		return fmt.Errorf("Code must be an int %T", c)
 	}
-	if int64(r.StatusCode) != code {
+	if r.StatusCode != code {
 		return fmt.Errorf("code not equal")
 	}
 	return nil
@@ -65,14 +65,14 @@ func checkProtoMinor(r *http.Response, c interface{}) error {
 }
 
 func checkHeader(r *http.Response, c interface{}) error {
-	h, ok := c.(map[string]interface{})
+	h, ok := c.(map[interface{}]interface{})
 	if !ok {
 		return fmt.Errorf("Headers must be of the form Header = [value] %T", c)
 	}
 	headers := http.Header{}
 	for k, v := range h {
 		for _, vv := range v.([]interface{}) {
-			headers.Add(k, vv.(string))
+			headers.Add(k.(string), vv.(string))
 		}
 	}
 	for key := range headers {

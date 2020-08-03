@@ -1,0 +1,49 @@
+create_a_thing:
+  name: "Create a thing"
+  url: "{{ .host }}/things/"
+  method: "POST"
+  body: |
+          {
+                  "hello": "world",
+                  "works": false
+          }
+  headers:
+    Authorization: ["Bearer sample_bearer_token"]
+  assert:
+    response:
+      code: 200
+      body: '{"id": 0}'
+      headers:
+        Content-Type: ["application/json"]
+
+read_a_thing:
+  name: "Read a thing"
+  url: "{{ .host }}/things/${ json .create_a_thing `id` }"
+  method: "GET"
+  headers:
+    Authorization: ["Bearer sample_bearer_token"]
+  assert:
+    response:
+      code: 200
+    jsonschema:
+      ref: "examples/thing.json"
+
+delete_a_thing:
+  name: "Delete a thing"
+  url: "{{ .host }}/things/${ json .create_a_thing `id` }"
+  method: "DELETE"
+  headers:
+    Authorization: ["Bearer sample_bearer_token"]
+  assert:
+    response:
+      code: 201
+
+read_a_missing_thing:
+  name: "Read a missing thing"
+  url: "{{ .host }}/things/${ json .create_a_thing `id` }"
+  method: "GET"
+  headers:
+    Authorization: ["Bearer sample_bearer_token"]
+  assert:
+    response:
+      code: 404

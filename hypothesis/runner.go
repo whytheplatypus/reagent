@@ -39,7 +39,7 @@ func Check(t testable) (result []byte, err error) {
 		if err := asserter(res, args); err != nil {
 			resp, _ := httputil.DumpResponse(res, true)
 			req, _ := httputil.DumpRequest(res.Request, true)
-			return nil, fmt.Errorf("%s : %s : %s", err, string(req), string(resp))
+			return nil, fmt.Errorf("%s :\n %s\n : %s", err, string(req), string(resp))
 		}
 	}
 	result, err = ioutil.ReadAll(res.Body)

@@ -13,7 +13,7 @@ type steps map[string]*step
 
 type step struct {
 	Name    string
-	URI     string
+	URL     string
 	Assert  map[string]map[string]interface{}
 	Headers http.Header
 	Method  string
@@ -25,7 +25,7 @@ func (s *step) Assertions() map[string]map[string]interface{} {
 }
 
 func (s *step) Do() (*http.Response, error) {
-	req, err := http.NewRequest(s.Method, s.URI, bytes.NewBuffer([]byte(s.Body)))
+	req, err := http.NewRequest(s.Method, s.URL, bytes.NewBuffer([]byte(s.Body)))
 	if err != nil {
 		return nil, err
 	}
@@ -78,7 +78,7 @@ func (t *Trial) ParseFile(path string) error {
 	if err := tmp.Execute(b, t.Variables); err != nil {
 		return err
 	}
-	steps, keys, err := decodeTOML(b)
+	steps, keys, err := decodeYAML(b.Bytes())
 	if err != nil {
 		return err
 	}
@@ -97,10 +97,10 @@ func (t *Trial) Run() error {
 		//template URL, Body
 
 		b := bytes.NewBuffer([]byte{})
-		if err := template.Must(template.New(name).Delims("${", "}").Funcs(funcMap).Parse(step.URI)).Execute(b, t.results); err != nil {
+		if err := template.Must(template.New(name).Delims("${", "}").Funcs(funcMap).Parse(step.URL)).Execute(b, t.results); err != nil {
 			return err
 		}
-		step.URI = b.String()
+		step.URL = b.String()
 
 		result, err := hypothesis.Check(step)
 		if err != nil {

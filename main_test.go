@@ -25,7 +25,7 @@ func TestCRUD(t *testing.T) {
 	vars := map[string]string{
 		"host": ts.URL,
 	}
-	trial, err := experiment.NewTrial("crud", vars, "examples/crud.toml")
+	trial, err := experiment.NewTrial("crud", vars, "examples/crud.yaml")
 	if err != nil {
 		t.Fatal(err)
 	}
