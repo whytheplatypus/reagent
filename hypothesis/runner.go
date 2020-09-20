@@ -8,9 +8,9 @@ import (
 	"net/http/httputil"
 )
 
-type assertable func(*http.Response, map[string]interface{}) error
+type Assertable func(*http.Response, map[string]interface{}) error
 
-var asserters = map[string]assertable{}
+var asserters = map[string]Assertable{}
 
 type testable interface {
 	Do() (*http.Response, error)
@@ -22,6 +22,11 @@ var (
 	// currentlly supported assertions are `jsonschema` and `code`
 	ErrUnregisteredAsserter = errors.New("asserter is not registered")
 )
+
+func Register(name string, test Assertable) error {
+	asserters[name] = test
+	return nil
+}
 
 // Check a hypothesis. Returns the content of the body of the API response and, if the hypothesis is disproven, an error.
 func Check(t testable) (result []byte, err error) {
@@ -39,7 +44,7 @@ func Check(t testable) (result []byte, err error) {
 		if err := asserter(res, args); err != nil {
 			resp, _ := httputil.DumpResponse(res, true)
 			req, _ := httputil.DumpRequest(res.Request, true)
-			return nil, fmt.Errorf("%s :\n %s\n : %s", err, string(req), string(resp))
+			return nil, fmt.Errorf("%s : %s :\n %s\n : %s", asrt, err, string(req), string(resp))
 		}
 	}
 	result, err = ioutil.ReadAll(res.Body)

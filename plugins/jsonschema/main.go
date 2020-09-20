@@ -1,19 +1,37 @@
-package hypothesis
+package main
 
 import (
 	"bytes"
 	"fmt"
 	"io/ioutil"
+	"log"
 	"net/http"
 
+	"github.com/whytheplatypus/reagent/extend"
+
+	"github.com/hashicorp/go-plugin"
 	"github.com/xeipuuv/gojsonschema"
 )
 
-func init() {
-	asserters["jsonschema"] = assertJSONSchema
+var handshakeConfig = plugin.HandshakeConfig{
+	ProtocolVersion:  1,
+	MagicCookieKey:   "BASIC_PLUGIN",
+	MagicCookieValue: "hello",
+}
+
+func main() {
+	// pluginMap is the map of plugins we can dispense.
+	var pluginMap = map[string]plugin.Plugin{
+		"jsonschema": &extend.AssertablePlugin{Impl: assertJSONSchema},
+	}
+	plugin.Serve(&plugin.ServeConfig{
+		HandshakeConfig: handshakeConfig,
+		Plugins:         pluginMap,
+	})
 }
 
 func assertJSONSchema(r *http.Response, args map[string]interface{}) error {
+	log.Println("hello world")
 	ref, ok := args["ref"].(string)
 	if !ok {
 		return fmt.Errorf("ref must be a string %T", ref)
@@ -44,5 +62,6 @@ func assertJSONSchema(r *http.Response, args map[string]interface{}) error {
 		}
 		return fmt.Errorf(s)
 	}
+	log.Println("finished check")
 	return nil
 }

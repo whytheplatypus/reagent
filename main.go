@@ -7,10 +7,14 @@ import (
 	"io/ioutil"
 	"log"
 	"os"
+	"os/exec"
 	"strings"
 	"sync"
 
+	"github.com/hashicorp/go-plugin"
 	"github.com/whytheplatypus/reagent/experiment"
+	"github.com/whytheplatypus/reagent/extend"
+	"github.com/whytheplatypus/reagent/hypothesis"
 )
 
 var exitCode = 0
@@ -45,10 +49,12 @@ func main() {
 	flags.Parse(os.Args[1:])
 	tf := flags.Args()
 	if verbose {
-		log.SetFlags(log.LstdFlags)
+		log.SetFlags(log.LstdFlags | log.Llongfile)
 	} else {
 		log.SetOutput(ioutil.Discard)
 	}
+	loadPlugins()
+	log.Println("plugins loaded")
 	var wg sync.WaitGroup
 	for _, f := range tf {
 		wg.Add(1)
@@ -70,4 +76,39 @@ func main() {
 	}
 	wg.Wait()
 	os.Exit(exitCode)
+}
+
+func loadPlugins() {
+	var handshakeConfig = plugin.HandshakeConfig{
+		ProtocolVersion:  1,
+		MagicCookieKey:   "BASIC_PLUGIN",
+		MagicCookieValue: "hello",
+	}
+	// We're a host. Start by launching the plugin process.
+	client := plugin.NewClient(&plugin.ClientConfig{
+		HandshakeConfig:  handshakeConfig,
+		Plugins:          extend.AssertablePlugins(),
+		Cmd:              exec.Command("sh", "-c", "plugins/jsonschema/jsonschema"),
+		AllowedProtocols: []plugin.Protocol{plugin.ProtocolNetRPC},
+	})
+	//defer client.Kill()
+
+	// Connect via RPC
+	rpcClient, err := client.Client()
+	if err != nil {
+		fmt.Println("Error:", err.Error())
+		os.Exit(1)
+	}
+
+	// Request the plugin
+	raw, err := rpcClient.Dispense("jsonschema")
+	if err != nil {
+		fmt.Println("Error:", err.Error())
+		os.Exit(1)
+	}
+
+	// We should have a KV store now! This feels like a normal interface
+	// implementation but is in fact over an RPC connection.
+	kv := raw.(extend.Assertable)
+	hypothesis.Register("jsonschema", kv.Assert)
 }

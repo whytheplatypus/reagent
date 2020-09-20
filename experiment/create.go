@@ -3,6 +3,7 @@ package experiment
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"text/template"
 
@@ -104,7 +105,7 @@ func (t *Trial) Run() error {
 
 		result, err := hypothesis.Check(step)
 		if err != nil {
-			return err
+			return fmt.Errorf("%s : %s", name, err.Error())
 		}
 		t.results[name] = result
 	}
